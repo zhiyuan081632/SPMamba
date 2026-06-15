@@ -13,6 +13,7 @@ import torch
 import yaml
 import json
 import argparse
+from datetime import datetime
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -39,6 +40,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--conf_dir",
                     default="local/mixit_conf.yml",
                     help="Full path to save best validation model")
+parser.add_argument("--output_dir",
+                    default=None,
+                    help="Directory to save metrics.csv and wav outputs. Defaults to output/<timestamp>.")
 
 
 compute_metrics = ["si_sdr", "sdr"]
@@ -90,8 +94,13 @@ def main(config):
     _, _ , test_set = datamodule.make_sets
    
     # Randomly choose the indexes of sentences to save.
-    ex_save_dir = os.path.join(train_conf["main_args"]["exp_dir"], "results/")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ex_save_dir = config.get("output_dir") or os.path.join("output", timestamp)
+    ex_save_dir = os.path.abspath(ex_save_dir)
     os.makedirs(ex_save_dir, exist_ok=True)
+    audio_save_dir = os.path.join(ex_save_dir, "audio")
+    os.makedirs(audio_save_dir, exist_ok=True)
+    sample_rate = train_conf["datamodule"]["data_config"]["sample_rate"]
     metrics = MetricsTracker(
         save_file=os.path.join(ex_save_dir, "metrics.csv"))
     torch.no_grad().__enter__()
@@ -104,6 +113,13 @@ def main(config):
             mix_np = mix
             sources_np = sources
             est_sources_np = est_sources.squeeze(0)
+            audio_key = os.path.splitext(os.path.basename(key))[0]
+            est_sources_audio = est_sources_np.detach().cpu().numpy()
+            if est_sources_audio.ndim == 1:
+                sf.write(os.path.join(audio_save_dir, f"{audio_key}.wav"), est_sources_audio, sample_rate)
+            else:
+                for src_idx, est_source in enumerate(est_sources_audio, start=1):
+                    sf.write(os.path.join(audio_save_dir, f"{audio_key}_s{src_idx}.wav"), est_source, sample_rate)
             metrics(mix=mix_np,
                     clean=sources_np,
                     estimate=est_sources_np,
