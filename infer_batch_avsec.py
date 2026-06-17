@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import argparse
 import csv
+import gc
 import os
 import sys
 from pathlib import Path
@@ -65,6 +66,57 @@ def get_pair_frames(pair):
         return 0
 
 
+def make_dynamic_batches(pairs, max_batch_size, max_batch_frames):
+    batches = []
+    current = []
+    current_max_frames = 0
+
+    for pair in pairs:
+        pair_frames = get_pair_frames(pair)
+        next_max_frames = max(current_max_frames, pair_frames)
+        next_padded_frames = next_max_frames * (len(current) + 1)
+        exceeds_size = len(current) >= max_batch_size
+        exceeds_frames = current and next_padded_frames > max_batch_frames
+        if exceeds_size or exceeds_frames:
+            batches.append(current)
+            current = []
+            current_max_frames = 0
+
+        current.append(pair)
+        current_max_frames = max(current_max_frames, pair_frames)
+
+    if current:
+        batches.append(current)
+    return batches
+
+
+def is_cuda_oom(exc):
+    return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+
+
+def is_fatal_cuda_state(exc):
+    if not isinstance(exc, RuntimeError):
+        return False
+    message = str(exc).lower()
+    fatal_markers = [
+        "device not ready",
+        "illegal memory access",
+        "unspecified launch failure",
+        "device-side assert",
+    ]
+    return any(marker in message for marker in fatal_markers)
+
+
+def safe_cuda_cleanup(device):
+    gc.collect()
+    if device.type != "cuda":
+        return
+    try:
+        torch.cuda.empty_cache()
+    except RuntimeError as cleanup_exc:
+        print(f"[Warning] CUDA cleanup failed after OOM: {cleanup_exc}")
+
+
 def load_pair_audio(scene_id, mixed_path, target_path, sample_rate):
     mix, mix_sr = load_mono(str(mixed_path))
     mix = resample_if_needed(mix, mix_sr, sample_rate, f"{scene_id} mix")
@@ -84,58 +136,107 @@ def pad_audio_batch(items):
     return mix_batch
 
 
-def process_batch(batch_pairs, output_root, model, sample_rate, device, save_mix=True, print_metrics=False):
-    items = []
+def infer_one_audio(model, mix_audio, device, chunk_frames):
+    estimates = []
+    total_frames = len(mix_audio)
+    if chunk_frames <= 0 or total_frames <= chunk_frames:
+        mix_tensor = torch.from_numpy(mix_audio).to(device)
+        with torch.inference_mode():
+            estimate = model(mix_tensor[None]).squeeze(0).detach().cpu()
+        del mix_tensor
+        return estimate
+
+    for start in range(0, total_frames, chunk_frames):
+        end = min(start + chunk_frames, total_frames)
+        chunk_tensor = torch.from_numpy(mix_audio[start:end]).to(device)
+        with torch.inference_mode():
+            chunk_estimate = model(chunk_tensor[None]).squeeze(0).detach().cpu()
+        estimates.append(chunk_estimate)
+        del chunk_tensor, chunk_estimate
+        safe_cuda_cleanup(device)
+
+    min_sources = min(estimate.shape[0] for estimate in estimates)
+    estimates = [estimate[:min_sources] for estimate in estimates]
+    return torch.cat(estimates, dim=-1)
+
+
+def process_batch(batch_pairs, output_root, model, sample_rate, device, save_mix=True, print_metrics=False, chunk_frames=0):
+    rows = []
     for scene_id, mixed_path, target_path in batch_pairs:
         mix, target, length = load_pair_audio(scene_id, mixed_path, target_path, sample_rate)
-        items.append(
-            {
-                "scene_id": scene_id,
-                "mixed_path": mixed_path,
-                "target_path": target_path,
-                "mix": mix,
-                "target": target,
-                "length": length,
-            }
-        )
+        mix = mix[:length]
+        target = target[:length]
 
-    mix_batch = torch.from_numpy(pad_audio_batch(items)).to(device)
-    with torch.inference_mode():
-        estimates = model(mix_batch)
-    if estimates.ndim == 2:
-        estimates = estimates[:, None, :]
+        estimate = infer_one_audio(model, mix, device, chunk_frames)
+        length = min(length, estimate.shape[-1])
+        mix_tensor = torch.from_numpy(mix[:length])
+        target_tensor = torch.from_numpy(target[:length])
+        estimate = estimate[:, :length]
 
-    rows = []
-    for batch_idx, item in enumerate(items):
-        scene_id = item["scene_id"]
         output_dir = output_root / scene_id
         wav_dir = output_dir / "wav"
         wav_dir.mkdir(parents=True, exist_ok=True)
 
-        length = min(item["length"], estimates.shape[-1])
-        mix_tensor = torch.from_numpy(item["mix"][:length]).to(device)
-        target_tensor = torch.from_numpy(item["target"][:length]).to(device)
-        estimate = estimates[batch_idx, :, :length]
-
         if save_mix:
-            sf.write(wav_dir / "mix.wav", mix_tensor.cpu().numpy(), sample_rate)
-        for idx, source in enumerate(estimate.detach().cpu().numpy(), start=1):
+            sf.write(wav_dir / "mix.wav", mix_tensor.numpy(), sample_rate)
+        for idx, source in enumerate(estimate.numpy(), start=1):
             sf.write(wav_dir / f"estimate_s{idx}.wav", source, sample_rate)
 
         metrics_path = output_dir / "metrics.csv"
         best_idx = write_single_target_metrics(mix_tensor, target_tensor, estimate, "s1", str(metrics_path))
-        sf.write(wav_dir / "best_s1.wav", estimate[best_idx - 1].detach().cpu().numpy(), sample_rate)
+        sf.write(wav_dir / "best_s1.wav", estimate[best_idx - 1].numpy(), sample_rate)
 
         row = read_metric_row(metrics_path)
         row["scene_id"] = scene_id
-        row["mix"] = str(item["mixed_path"])
-        row["target"] = str(item["target_path"])
+        row["mix"] = str(mixed_path)
+        row["target"] = str(target_path)
         row["output_dir"] = str(output_dir)
         rows.append(row)
         if print_metrics:
             print_metrics_file(str(metrics_path))
 
+        del estimate, mix_tensor, target_tensor
+        safe_cuda_cleanup(device)
+
     return rows
+
+
+def read_scene_id_filter(path):
+    if not path:
+        return None
+    filter_path = Path(path).expanduser()
+    if not filter_path.exists():
+        return set()
+
+    scene_ids = set()
+    with open(filter_path, "r", newline="") as f:
+        sample = f.read(1024)
+        f.seek(0)
+        sample_lines = sample.splitlines()
+        has_scene_id_header = bool(sample_lines) and "scene_id" in sample_lines[0]
+        if has_scene_id_header:
+            for row in csv.DictReader(f):
+                scene_id = row.get("scene_id")
+                if scene_id:
+                    scene_ids.add(scene_id.strip())
+        else:
+            for line in f:
+                scene_id = line.strip().split(",")[0]
+                if scene_id:
+                    scene_ids.add(scene_id)
+    return scene_ids
+
+
+def filter_pairs_by_scene_ids(pairs, include_ids=None, exclude_ids=None):
+    filtered = []
+    for pair in pairs:
+        scene_id = pair[0]
+        if include_ids is not None and scene_id not in include_ids:
+            continue
+        if exclude_ids is not None and scene_id in exclude_ids:
+            continue
+        filtered.append(pair)
+    return filtered
 
 
 def write_summary(summary_path, rows):
@@ -178,8 +279,21 @@ def main():
     parser.add_argument("--start_id", type=int, default=None, help="Optional numeric scene id start, e.g. 50000.")
     parser.add_argument("--end_id", type=int, default=None, help="Optional numeric scene id end, e.g. 50100.")
     parser.add_argument("--limit", type=int, default=None, help="Optional max number of pairs to process.")
-    parser.add_argument("--batch_size", type=int, default=4, help="Number of scenes to infer per model forward pass.")
-    parser.add_argument("--no_sort_by_length", action="store_true", help="Disable length sorting before batching.")
+    parser.add_argument("--batch_size", type=int, default=1, help="Maximum number of scenes per scheduling group. Use 1 for best stability on small GPUs.")
+    parser.add_argument(
+        "--max_batch_seconds",
+        type=float,
+        default=12.0,
+        help="Maximum padded audio seconds per scheduling group. Lower this if CUDA OOM occurs.",
+    )
+    parser.add_argument(
+        "--chunk_seconds",
+        type=float,
+        default=6.0,
+        help="Split each file into this many seconds per model forward pass. Use 0 to disable chunking.",
+    )
+    parser.add_argument("--include_scene_ids", default=None, help="Optional file containing scene IDs to process, one per line or CSV with scene_id.")
+    parser.add_argument("--exclude_scene_ids", default=None, help="Optional file containing scene IDs to skip, one per line or CSV with scene_id.")
     parser.add_argument("--no_save_mix", action="store_true", help="Do not write copied mix.wav files; saves disk I/O.")
     parser.add_argument("--print_each_metrics", action="store_true", help="Print metrics for every scene; slower for large batches.")
     parser.add_argument("--overwrite", action="store_true", help="Reprocess scenes that already have metrics.csv.")
@@ -202,12 +316,14 @@ def main():
         start_id=args.start_id,
         end_id=args.end_id,
     )
+    include_ids = read_scene_id_filter(args.include_scene_ids)
+    exclude_ids = read_scene_id_filter(args.exclude_scene_ids)
+    pairs = filter_pairs_by_scene_ids(pairs, include_ids=include_ids, exclude_ids=exclude_ids)
     if args.limit is not None:
         pairs = pairs[: args.limit]
-    if not args.no_sort_by_length:
-        pairs = sorted(pairs, key=get_pair_frames)
 
     print(f"Found {len(pairs)} matched pair(s) in: {scenes_dir}")
+    print("Processing order: filename order from input directory.")
     if missing_targets:
         print(f"Warning: {len(missing_targets)} mixed file(s) have no matching target file.")
     if args.dry_run:
@@ -228,9 +344,15 @@ def main():
     summary_rows = []
     failures = []
     total = len(pairs)
+    summary_path = output_root / "summary_metrics.csv"
+    failures_path = output_root / "failed_scenes.csv"
 
     if args.batch_size < 1:
         raise ValueError("--batch_size must be >= 1")
+    if args.max_batch_seconds <= 0:
+        raise ValueError("--max_batch_seconds must be > 0")
+    if args.chunk_seconds < 0:
+        raise ValueError("--chunk_seconds must be >= 0")
 
     pending_pairs = []
     for index, pair in enumerate(pairs, start=1):
@@ -249,10 +371,20 @@ def main():
         pending_pairs.append(pair)
 
     pending_total = len(pending_pairs)
-    for start in range(0, pending_total, args.batch_size):
-        batch_pairs = pending_pairs[start : start + args.batch_size]
+    max_batch_frames = int(args.max_batch_seconds * sample_rate)
+    chunk_frames = int(args.chunk_seconds * sample_rate) if args.chunk_seconds > 0 else 0
+    dynamic_batches = make_dynamic_batches(pending_pairs, args.batch_size, max_batch_frames)
+    print(
+        f"Processing {pending_total} pending scene(s) in {len(dynamic_batches)} scheduling group(s) "
+        f"with max_group_size={args.batch_size}, max_group_seconds={args.max_batch_seconds}, "
+        f"chunk_seconds={args.chunk_seconds}."
+    )
+
+    for batch_index, batch_pairs in enumerate(dynamic_batches, start=1):
         batch_label = f"{batch_pairs[0][0]}..{batch_pairs[-1][0]}" if len(batch_pairs) > 1 else batch_pairs[0][0]
-        print(f"Batch {start // args.batch_size + 1}/{(pending_total + args.batch_size - 1) // args.batch_size}: {batch_label}")
+        batch_frames = max(get_pair_frames(pair) for pair in batch_pairs)
+        batch_seconds = len(batch_pairs) * batch_frames / sample_rate
+        print(f"Group {batch_index}/{len(dynamic_batches)}: {batch_label} ({len(batch_pairs)} file(s), {batch_seconds:.1f} padded sec)")
         try:
             rows = process_batch(
                 batch_pairs,
@@ -262,12 +394,31 @@ def main():
                 device,
                 save_mix=not args.no_save_mix,
                 print_metrics=args.print_each_metrics,
+                chunk_frames=chunk_frames,
             )
             summary_rows.extend(rows)
+            write_summary(summary_path, summary_rows)
         except RuntimeError as exc:
-            if "out of memory" in str(exc).lower() and device.type == "cuda":
-                torch.cuda.empty_cache()
-            print(f"[Batch Error] {batch_label}: {exc}")
+            if is_fatal_cuda_state(exc):
+                print(f"[Fatal CUDA] {batch_label}: {exc}")
+                print("CUDA is not recoverable in this Python process. Progress has been written; restart the command to continue.")
+                for scene_id, mixed_path, target_path in batch_pairs:
+                    failures.append(
+                        {
+                            "scene_id": scene_id,
+                            "mix": str(mixed_path),
+                            "target": str(target_path),
+                            "error": repr(exc),
+                        }
+                    )
+                write_summary(summary_path, summary_rows)
+                write_failures(failures_path, failures)
+                raise SystemExit(1)
+            if is_cuda_oom(exc):
+                print(f"[OOM] {batch_label}: {exc}")
+                safe_cuda_cleanup(device)
+            else:
+                print(f"[Batch Error] {batch_label}: {exc}")
             print("Retrying this batch one scene at a time.")
             for scene_id, mixed_path, target_path in batch_pairs:
                 try:
@@ -279,9 +430,26 @@ def main():
                         device,
                         save_mix=not args.no_save_mix,
                         print_metrics=args.print_each_metrics,
+                        chunk_frames=chunk_frames,
                     )
                     summary_rows.extend(rows)
+                    write_summary(summary_path, summary_rows)
                 except Exception as item_exc:
+                    if is_fatal_cuda_state(item_exc):
+                        print(f"[Fatal CUDA] {scene_id}: {item_exc}")
+                        failures.append(
+                            {
+                                "scene_id": scene_id,
+                                "mix": str(mixed_path),
+                                "target": str(target_path),
+                                "error": repr(item_exc),
+                            }
+                        )
+                        write_summary(summary_path, summary_rows)
+                        write_failures(failures_path, failures)
+                        raise SystemExit(1)
+                    if is_cuda_oom(item_exc):
+                        safe_cuda_cleanup(device)
                     print(f"[Error] {scene_id}: {item_exc}")
                     failures.append(
                         {
@@ -291,6 +459,7 @@ def main():
                             "error": repr(item_exc),
                         }
                     )
+                    write_failures(failures_path, failures)
         except Exception as exc:
             print(f"[Batch Error] {batch_label}: {exc}")
             for scene_id, mixed_path, target_path in batch_pairs:
@@ -302,9 +471,8 @@ def main():
                         "error": repr(exc),
                     }
                 )
+            write_failures(failures_path, failures)
 
-    summary_path = output_root / "summary_metrics.csv"
-    failures_path = output_root / "failed_scenes.csv"
     write_summary(summary_path, summary_rows)
     write_failures(failures_path, failures)
 

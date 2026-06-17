@@ -1,5 +1,6 @@
 import argparse
 import csv
+import gc
 import os
 from datetime import datetime
 
@@ -88,6 +89,42 @@ def print_metrics_file(metrics_path):
     if "best_estimate" in row:
         print(f"  best_estimate: {row['best_estimate']}")
 
+
+def safe_cuda_cleanup(device):
+    gc.collect()
+    if device.type != "cuda":
+        return
+    try:
+        torch.cuda.empty_cache()
+    except RuntimeError:
+        pass
+
+
+def infer_audio(model, mix, device, chunk_frames, sample_rate):
+    total_frames = len(mix)
+    if chunk_frames <= 0 or total_frames <= chunk_frames:
+        mix_tensor = torch.from_numpy(mix).to(device)
+        with torch.inference_mode():
+            estimate = model(mix_tensor[None]).squeeze(0).detach().cpu()
+        del mix_tensor
+        safe_cuda_cleanup(device)
+        return estimate
+
+    estimates = []
+    for start in range(0, total_frames, chunk_frames):
+        end = min(start + chunk_frames, total_frames)
+        print(f"Processing chunk {start // chunk_frames + 1}/{(total_frames + chunk_frames - 1) // chunk_frames}: {start / sample_rate:.1f}s-{end / sample_rate:.1f}s")
+        chunk_tensor = torch.from_numpy(mix[start:end]).to(device)
+        with torch.inference_mode():
+            chunk_estimate = model(chunk_tensor[None]).squeeze(0).detach().cpu()
+        estimates.append(chunk_estimate)
+        del chunk_tensor, chunk_estimate
+        safe_cuda_cleanup(device)
+
+    min_sources = min(chunk_estimate.shape[0] for chunk_estimate in estimates)
+    estimates = [chunk_estimate[:min_sources] for chunk_estimate in estimates]
+    return torch.cat(estimates, dim=-1)
+
         
 def main():
     parser = argparse.ArgumentParser()
@@ -96,6 +133,7 @@ def main():
     parser.add_argument("--s2", default=None, help="Path to clean source 2 wav")
     parser.add_argument("--conf_dir", default="configs/spmamba-echo2mix.yml")
     parser.add_argument("--output_dir", "--output", default=None)
+    parser.add_argument("--chunk_seconds", type=float, default=6.0, help="Split long audio into chunks for inference. Use 0 to disable chunking.")
     args = parser.parse_args()
 
     if args.mix is None and (args.s1 is None or args.s2 is None):
@@ -125,12 +163,12 @@ def main():
         if len(refs) == 2:
             length = min(len(mix), len(refs[0][1]), len(refs[1][1]))
             mix = mix[:length]
-            clean_tensor = torch.from_numpy(np.stack([refs[0][1][:length], refs[1][1][:length]])).to(device)
+            clean_tensor = torch.from_numpy(np.stack([refs[0][1][:length], refs[1][1][:length]]))
         elif len(refs) == 1:
             target_label, target_audio = refs[0]
             length = min(len(mix), len(target_audio))
             mix = mix[:length]
-            target_tensor = torch.from_numpy(target_audio[:length]).to(device)
+            target_tensor = torch.from_numpy(target_audio[:length])
     else:
         s1, sr1 = load_mono(args.s1)
         s2, sr2 = load_mono(args.s2)
@@ -139,17 +177,19 @@ def main():
         length = min(len(s1), len(s2))
         s1, s2 = s1[:length], s2[:length]
         mix = s1 + s2
-        clean_tensor = torch.from_numpy(np.stack([s1, s2])).to(device)
+        clean_tensor = torch.from_numpy(np.stack([s1, s2]))
 
     output_dir = args.output_dir or os.path.join("output", datetime.now().strftime("%Y%m%d_%H%M%S"))
     output_dir = os.path.abspath(output_dir)
     wav_dir = os.path.join(output_dir, "wav")
     os.makedirs(wav_dir, exist_ok=True)
 
-    mix_tensor = torch.from_numpy(mix).to(device)
+    chunk_frames = int(args.chunk_seconds * model_sample_rate) if args.chunk_seconds > 0 else 0
+    if chunk_frames > 0:
+        print(f"Using chunked inference: {args.chunk_seconds}s per chunk")
 
-    with torch.no_grad():
-        estimate = model(mix_tensor[None]).squeeze(0)
+    mix_tensor = torch.from_numpy(mix)
+    estimate = infer_audio(model, mix, device, chunk_frames, model_sample_rate)
 
     min_len = min(mix_tensor.shape[-1], estimate.shape[-1])
     if clean_tensor is not None:
@@ -162,7 +202,7 @@ def main():
     estimate = estimate[:, :min_len]
 
     sf.write(os.path.join(wav_dir, "mix.wav"), mix_tensor.cpu().numpy(), model_sample_rate)
-    for idx, source in enumerate(estimate.detach().cpu().numpy(), start=1):
+    for idx, source in enumerate(estimate.numpy(), start=1):
         sf.write(os.path.join(wav_dir, f"estimate_s{idx}.wav"), source, model_sample_rate)
 
     print(f"Saved wav files to: {wav_dir}")
@@ -176,7 +216,7 @@ def main():
     elif target_tensor is not None:
         metrics_path = os.path.join(output_dir, "metrics.csv")
         best_idx = write_single_target_metrics(mix_tensor, target_tensor, estimate, target_label, metrics_path)
-        sf.write(os.path.join(wav_dir, f"best_{target_label}.wav"), estimate[best_idx - 1].detach().cpu().numpy(), model_sample_rate)
+        sf.write(os.path.join(wav_dir, f"best_{target_label}.wav"), estimate[best_idx - 1].numpy(), model_sample_rate)
         print(f"Saved single-target metrics to: {metrics_path}")
         print(f"Best estimate for {target_label}: estimate_s{best_idx}.wav")
         print_metrics_file(metrics_path)
