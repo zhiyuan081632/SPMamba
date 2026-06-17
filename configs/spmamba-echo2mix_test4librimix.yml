@@ -63,11 +63,11 @@ scheduler:
 datamodule:
   data_name: Echo2MixDataModule
   data_config:
-    train_dir: DataPreProcess/Echo2Mix/train
-    valid_dir: DataPreProcess/Echo2Mix/val
-    test_dir: DataPreProcess/Echo2Mix/test
+    train_dir: DataPreProcess/Libri2Mix/train-100
+    valid_dir: DataPreProcess/Libri2Mix/dev
+    test_dir: DataPreProcess/Libri2Mix/test
     n_src: 2
-    sample_rate: 16000
+    sample_rate: 8000
     segment: 3.0
     normalize_audio: false
     batch_size: 1

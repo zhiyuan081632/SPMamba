@@ -60,7 +60,7 @@ class Libri2MixDataset(Dataset):
             self.fps_len = int(segment * fps)
         self.n_src = n_src
         self.test = self.seg_len is None
-        mix_json = os.path.join(json_dir, "mix_clean.json")
+        mix_json = os.path.join(json_dir, "mix.json")
         sources_json = [
             os.path.join(json_dir, source + ".json") for source in ["s1", "s2"]
         ]

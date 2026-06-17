@@ -147,7 +147,7 @@ class Echo2MixDataset(Dataset):
                 m_std = mixture.std(-1, keepdim=True)
                 mixture = normalize_tensor_wav(mixture, eps=self.EPS, std=m_std)
                 target = normalize_tensor_wav(target, eps=self.EPS, std=m_std)
-            return mixture, target.unsqueeze(0), self.mix[idx][0].split("/")[-1]
+            return mixture, target.unsqueeze(0), self.mix[idx][0]
         # import pdb; pdb.set_trace()
         if self.n_src == 2:
             if self.mix[idx][1] == self.seg_len or self.test:
@@ -177,7 +177,7 @@ class Echo2MixDataset(Dataset):
                 mixture = normalize_tensor_wav(mixture, eps=self.EPS, std=m_std)
                 sources = normalize_tensor_wav(sources, eps=self.EPS, std=m_std)
 
-            return mixture, sources, self.mix[idx][0].split("/")[-1]
+            return mixture, sources, self.mix[idx][0]
 
     def __getitem__(self, index: int):
         return self.preprocess_audio_only(index)
@@ -221,7 +221,17 @@ class Echo2MixDataModule(object):
         self.data_val: Dataset = None
         self.data_test: Dataset = None
 
-    def setup(self) -> None:
+    def setup(self, stage: str = None) -> None:
+        if stage == "test":
+            self.data_test = Echo2MixDataset(
+                json_dir=self.test_dir,
+                n_src=self.n_src,
+                sample_rate=self.sample_rate,
+                segment=None,
+                normalize_audio=self.normalize_audio,
+            )
+            return
+
         self.data_train = Echo2MixDataset(
             json_dir=self.train_dir,
             n_src=self.n_src,

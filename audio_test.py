@@ -38,7 +38,7 @@ from rich.progress import (
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--conf_dir",
-                    default="local/mixit_conf.yml",
+                    default="configs/spmamba-echo2mix.yml",
                     help="Full path to save best validation model")
 parser.add_argument("--output_dir",
                     default=None,
@@ -46,6 +46,24 @@ parser.add_argument("--output_dir",
 
 
 compute_metrics = ["si_sdr", "sdr"]
+
+
+def make_audio_key(key, idx):
+    key_path = os.path.normpath(str(key))
+    basename = os.path.basename(key_path)
+    basename_stem = os.path.splitext(basename)[0]
+
+    if "Libri2Mix" in key_path or basename != "mix.wav":
+        return basename_stem
+
+    parts = key_path.split(os.sep)
+    if len(parts) >= 4:
+        parts = parts[-4:]
+    stem_parts = parts[:-1] + [basename_stem] if parts else [str(idx)]
+    safe_key = "__".join(part for part in stem_parts if part)
+    safe_key = safe_key.replace(" ", "_")
+    return f"{idx:06d}__{safe_key}"
+
 
 def main(config):
     metricscolumn = MyMetricsTextColumn(style=RichProgressBarTheme.metrics)
@@ -113,7 +131,7 @@ def main(config):
             mix_np = mix
             sources_np = sources
             est_sources_np = est_sources.squeeze(0)
-            audio_key = os.path.splitext(os.path.basename(key))[0]
+            audio_key = make_audio_key(key, idx)
             est_sources_audio = est_sources_np.detach().cpu().numpy()
             if est_sources_audio.ndim == 1:
                 sf.write(os.path.join(audio_save_dir, f"{audio_key}.wav"), est_sources_audio, sample_rate)

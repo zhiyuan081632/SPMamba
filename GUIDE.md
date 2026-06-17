@@ -1,4 +1,28 @@
-# infer 
+
+# 生成数据
+```
+cd DataPreProcess
+
+## create libri2mix datasets(min)
+./create_librimix_min.sh
+
+
+## create echo2mix datasets
+./create_echo2mic.sh
+
+```
+
+# 性能评测
+```
+## eval for echo2mix testsets
+python audio_test.py --conf_dir configs/spmamba-echo2mix.yml --output_dir output/echo2mix
+
+## eval for libri2mix testsets
+python audio_test.py --conf_dir configs/spmamba-librimix.yml --output_dir output/libri2mix
+```
+
+
+# 推理测试
 ```
 ## input s1 and s2, mix them, then seprate the mix
 python infer_two_sources.py --s1 asserts/audios/gt/1221_3575/spk1_reverb.wav --s2 asserts/audios/gt/1221_3575/spk2_reverb.wav  --conf_dir configs/spmamba-echo2mix.yml
