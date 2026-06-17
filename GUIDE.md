@@ -3,7 +3,7 @@
 ```
 cd DataPreProcess
 
-## create libri2mix datasets(min)
+## create libri2mix datasets(min, 8k/16k)
 ./create_librimix_min.sh
 
 
@@ -12,7 +12,7 @@ cd DataPreProcess
 
 ```
 
-# 性能评测
+# 性能评估
 ```
 ## eval for echo2mix testsets
 python audio_test.py --conf_dir configs/spmamba-echo2mix.yml --output_dir output/echo2mix

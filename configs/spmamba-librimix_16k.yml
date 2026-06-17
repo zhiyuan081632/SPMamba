@@ -4,8 +4,8 @@ audionet:
   audionet_config:
     input_dim: 64
     n_srcs: 2
-    n_fft: 512
-    stride: 128
+    n_fft: 256
+    stride: 64
     window: hann
     n_imics: 1
     n_layers: 6
@@ -36,7 +36,7 @@ loss:
 
 training:
   system: AudioLightningModule
-  gpus: [4,5,6,7]
+  gpus: [1,2,3,4,5,6,7]
   parallel: ddp
   epochs: 500
   early_stop:
@@ -61,7 +61,7 @@ scheduler:
 
 # Data config
 datamodule:
-  data_name: Echo2MixDataModule
+  data_name: Libri2MixDataModule
   data_config:
     train_dir: DataPreProcess/Libri2Mix_16k/train-100
     valid_dir: DataPreProcess/Libri2Mix_16k/dev
@@ -76,4 +76,4 @@ datamodule:
     persistent_workers: false
 
 exp:
-  exp_name: SPMamba-Echo2Mix
+  exp_name: SPMamba-Libri2Mix

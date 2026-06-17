@@ -4,7 +4,7 @@ from pathlib import Path
 import soundfile as sf
 
 SRC_ROOT = Path("/mnt/e/data/LibriMix/Libri2Mix/wav16k/min")
-OUT_ROOT = Path("/mnt/d/project/prjANS/src/AVSE/SPMamba/DataPreProcess/Libri2Mix")
+OUT_ROOT = Path("/mnt/d/project/prjANS/src/AVSE/SPMamba/DataPreProcess/Libri2Mix_16k")
 SPLITS = ["test", "dev", "train-100"]
 SUBDIRS = ["mix_clean", "s1", "s2"]
 
@@ -22,7 +22,7 @@ def collect_wav_infos(wav_dir: Path):
 
 def main():
     for split in SPLITS:
-        split_out_dir = OUT_ROOT / f"{split}_16k"
+        split_out_dir = OUT_ROOT / f"{split}"
         split_out_dir.mkdir(parents=True, exist_ok=True)
 
         split_counts = {}

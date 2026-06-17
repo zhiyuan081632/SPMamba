@@ -17,6 +17,6 @@ cp "$metadata_src/libri2mix_train-clean-100.csv" "$metadata_tmp/"
   --metadata_dir "$metadata_tmp" \
   --librimix_outdir /mnt/e/data/LibriMix \
   --n_src 2 \
-  --freqs 8k \
+  --freqs 16k \
   --modes min \
   --types mix_clean
