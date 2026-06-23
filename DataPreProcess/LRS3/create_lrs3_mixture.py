@@ -62,6 +62,7 @@ import torch
 import torch.nn.functional as F
 import pyloudnorm as pyln
 import warnings
+import pyroomacoustics as pra
 warnings.filterwarnings("ignore", message="Possible clipped samples in output.")
 
 # ----------------------------------------------------------------------- #
@@ -72,114 +73,135 @@ LUFS_TARGET = -17.0          # SonicSim uses -17 LUFS for speech sources
 LUFS_JITTER = 2.0            # ±2 dB random variation (SonicSim style)
 
 
-# ----------------------------------------------------------------------- #
-#  Synthetic RIR generation (image-source method, simplified)
-# ----------------------------------------------------------------------- #
+# -----------------------------------------------------------------------
+#  RIR generation using pyroomacoustics (diverse room types)
+# --------------------------------------------------------------------- #
+# Room type presets mimicking Echo2Mix/SonicSim scene diversity
+ROOM_PRESETS = [
+    # (name, dim_range, rt60_range, materials)
+    ("living_room",    ((4, 5, 2.6), (8, 7, 3.5)), (0.3, 0.6), "medium"),
+    ("bedroom",        ((3, 3, 2.4), (5, 4, 2.8)), (0.2, 0.4), "soft"),
+    ("kitchen",        ((3, 3, 2.5), (6, 5, 3.0)), (0.15, 0.35), "hard"),
+    ("bathroom",       ((2, 2, 2.3), (4, 3, 2.6)), (0.4, 0.8), "hard"),
+    ("dining_room",    ((4, 4, 2.6), (7, 6, 3.2)), (0.3, 0.55), "medium"),
+    ("meeting_room",   ((5, 4, 2.8), (10, 8, 3.5)), (0.4, 0.7), "medium"),
+    ("hallway",        ((2, 4, 2.4), (3, 12, 2.8)), (0.3, 0.6), "hard"),
+    ("lounge",         ((5, 5, 2.8), (9, 8, 3.5)), (0.35, 0.65), "soft"),
+    ("conference_room", ((6, 5, 2.8), (12, 10, 3.5)), (0.4, 0.7), "medium"),
+    ("office",         ((3, 3, 2.5), (6, 5, 3.0)), (0.25, 0.5), "medium"),
+]
+
+# Material absorption coefficients (low, mid, high frequency bands)
+MATERIAL_BANK = {
+    "hard":   {  # bathroom, kitchen — tiles, concrete
+        "walls": 0.05, "floor": 0.02, "ceiling": 0.10,
+    },
+    "medium": {  # living room, dining room — drywall, wood floor
+        "walls": 0.15, "floor": 0.10, "ceiling": 0.20,
+    },
+    "soft":   {  # bedroom, lounge — carpet, curtains
+        "walls": 0.30, "floor": 0.40, "ceiling": 0.30,
+    },
+}
+
+
 def generate_synthetic_rir(
     sample_rate: int = SAMPLE_RATE,
-    room_dim_range: tuple = ((3, 4, 2.5), (10, 8, 6)),
-    rt60_range: tuple = (0.2, 0.7),
 ) -> np.ndarray:
     """
-    Generate a synthetic monaural Room Impulse Response using a simplified
-    image-source method.
+    Generate a realistic Room Impulse Response using pyroomacoustics.
 
-    The RIR consists of:
-      - Direct path (delta with attenuation based on distance)
-      - Early reflections (image sources up to order 3)
-      - Late reverberation (exponentially decaying white noise)
+    Randomly selects from diverse room types (living room, bedroom, kitchen,
+    bathroom, hallway, etc.) with appropriate materials and dimensions to
+    match the diversity of Echo2Mix/SonicSim scenes.
 
     Returns
     -------
     np.ndarray, shape (L,)
-        Synthetic RIR of length L = ceil(rt60 * sample_rate).
+        RIR with direct path at sample 0, normalized so direct path = 1.0.
     """
-    # --- Random room parameters ---
-    min_d, max_d = room_dim_range
-    room = np.array([
-        random.uniform(min_d[i], max_d[i]) for i in range(3)
+    # --- Randomly select room type ---
+    name, dim_range, rt60_range, mat_key = random.choice(ROOM_PRESETS)
+    mats = MATERIAL_BANK[mat_key]
+
+    # --- Random room dimensions ---
+    room_dim = np.array([
+        random.uniform(dim_range[0][i], dim_range[1][i]) for i in range(3)
     ])
-    rt60 = random.uniform(*rt60_range)
 
     # --- Random source and receiver positions ---
-    src = np.array([random.uniform(0.5, d - 0.5) for d in room])
-    rcv = np.array([random.uniform(0.5, d - 0.5) for d in room])
-    while np.linalg.norm(src - rcv) < 1.0:
-        rcv = np.array([random.uniform(0.5, d - 0.5) for d in room])
+    src_pos = np.array([
+        random.uniform(0.5, room_dim[i] - 0.5) for i in range(3)
+    ])
+    rcv_pos = np.array([
+        random.uniform(0.5, room_dim[i] - 0.5) for i in range(3)
+    ])
+    # Ensure minimum distance
+    while np.linalg.norm(src_pos - rcv_pos) < 1.0:
+        rcv_pos = np.array([
+            random.uniform(0.5, room_dim[i] - 0.5) for i in range(3)
+        ])
 
-    # --- Reflection coefficient from RT60 (Sabine equation) ---
-    V = np.prod(room)
-    S = 2 * (room[0] * room[1] + room[0] * room[2] + room[1] * room[2])
-    alpha = 0.161 * V / (S * rt60)
-    alpha = np.clip(alpha, 0.01, 0.99)
-    beta = math.sqrt(1.0 - alpha)
+    # --- Target RT60 ---
+    target_rt60 = random.uniform(*rt60_range)
 
-    # --- RIR length ---
-    rir_length = int(math.ceil(rt60 * sample_rate))
-    rir = np.zeros(rir_length, dtype=np.float64)
+    # --- Create room with materials ---
+    # Build absorption per surface (6 walls: -x, +x, -y, +y, -z floor, +z ceiling)
+    abs_walls = mats["walls"]
+    abs_floor = mats["floor"]
+    abs_ceil = mats["ceiling"]
 
-    c = 343.0  # speed of sound
+    try:
+        room = pra.ShoeBox(
+            room_dim,
+            fs=sample_rate,
+            materials=pra.Material(abs_walls),
+            max_order=5,
+        )
+        # Override floor and ceiling materials
+        room.wall_materials[4] = pra.Material(abs_floor)   # floor (-z)
+        room.wall_materials[5] = pra.Material(abs_ceil)    # ceiling (+z)
+    except Exception:
+        # Fallback: uniform absorption
+        room = pra.ShoeBox(
+            room_dim,
+            fs=sample_rate,
+            materials=pra.Material(0.15),
+            max_order=5,
+        )
 
-    # --- Direct path ---
-    dist_direct = np.linalg.norm(src - rcv)
-    delay_direct = int(round(dist_direct / c * sample_rate))
-    if delay_direct < rir_length:
-        rir[delay_direct] = 1.0 / (4 * math.pi * dist_direct)
+    # --- Add source and microphone ---
+    room.add_source(src_pos)
+    room.add_microphone(rcv_pos)
 
-    # --- Early reflections (image sources up to order 3) ---
-    max_order = 3
-    for nx in range(-max_order, max_order + 1):
-        for ny in range(-max_order, max_order + 1):
-            for nz in range(-max_order, max_order + 1):
-                if nx == 0 and ny == 0 and nz == 0:
-                    continue
-                # Image source position (standard rectangular room formula):
-                #   even n:  img = n * L + src
-                #   odd  n:  img = n * L + (L - src)
-                img = np.array([
-                    nx * room[0] + src[0] if nx % 2 == 0 else nx * room[0] + (room[0] - src[0]),
-                    ny * room[1] + src[1] if ny % 2 == 0 else ny * room[1] + (room[1] - src[1]),
-                    nz * room[2] + src[2] if nz % 2 == 0 else nz * room[2] + (room[2] - src[2]),
-                ])
-                dist = np.linalg.norm(img - rcv)
-                if dist < 0.5:
-                    continue
-                delay = int(round(dist / c * sample_rate))
-                if delay >= rir_length:
-                    continue
-                attenuation = (1.0 / (4 * math.pi * dist)) * (
-                    beta ** (abs(nx) + abs(ny) + abs(nz))
-                )
-                rir[delay] += attenuation
+    # --- Compute RIR ---
+    room.compute_rir()
+    rir = room.rir[0][0]  # mic 0, source 0
 
-    # --- Late reverberation tail (exponentially decaying noise) ---
-    tail_start = int(0.05 * sample_rate)
-    if tail_start < rir_length:
-        tail_len = rir_length - tail_start
-        t = np.arange(tail_len) / sample_rate
-        decay = np.exp(-6.91 * t / rt60)
-        noise = np.random.randn(tail_len) * decay
-        if tail_start > 0 and abs(rir[tail_start - 1]) > 0:
-            noise_scale = abs(rir[tail_start - 1]) * 0.5
-        else:
-            noise_scale = 0.01
-        noise = noise * noise_scale / (np.std(noise) + 1e-10)
-        rir[tail_start:] += noise
+    # --- Find direct path and shift to sample 0 ---
+    direct_idx = int(round(
+        np.linalg.norm(src_pos - rcv_pos) / 343.0 * sample_rate
+    ))
+    if direct_idx > 0 and direct_idx < len(rir):
+        rir = np.concatenate([rir[direct_idx:], np.zeros(direct_idx)])
 
-    # --- Shift RIR so direct path starts at sample 0 (remove propagation delay) ---
-    if delay_direct > 0 and delay_direct < rir_length:
-        rir = np.concatenate([rir[delay_direct:], np.zeros(delay_direct)])
-
-    # --- Normalise so direct path is the dominant component ---
-    # Reflections are scaled to at most 0.3x the direct path amplitude.
-    # This prevents reflections from dominating the cross-correlation
-    # and causing an apparent delay in the reverberant audio.
+    # --- Normalize: direct path = 1.0, reflections ≤ 0.3x ---
     direct_amp = abs(rir[0])
     if direct_amp > 0:
         max_other = np.max(np.abs(rir[1:])) if len(rir) > 1 else 0.0
         if max_other > 0:
             rir[1:] *= (direct_amp * 0.3) / max_other
-        rir = rir / direct_amp  # direct path = 1.0
+        rir = rir / direct_amp
+    else:
+        # Fallback: peak normalize
+        peak = np.max(np.abs(rir))
+        if peak > 0:
+            rir = rir / peak
+
+    # --- Truncate to target RT60 length ---
+    target_len = int(math.ceil(target_rt60 * sample_rate))
+    if len(rir) > target_len:
+        rir = rir[:target_len]
 
     return rir.astype(np.float32)
 

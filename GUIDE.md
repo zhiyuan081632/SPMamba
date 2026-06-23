@@ -11,8 +11,8 @@ cd DataPreProcess
 ./create_echo2mic.sh
 
 
-## create lrs3 datasets(with reverb)
-./create_lrs3.sh --reverb
+## create lrs3 datasets with reverb(whin max_pairs)
+./create_lrs3.sh --reverb --max_pairs 10
 ```
 
 # 模型训练
