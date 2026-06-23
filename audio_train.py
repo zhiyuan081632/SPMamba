@@ -142,9 +142,23 @@ def main(config):
         callbacks.append(EarlyStopping(**config["training"]["early_stop"]))
     callbacks.append(MyRichProgressBar(theme=RichProgressBarTheme()))
 
-    # Don't ask GPU if they are not available.
-    gpus = config["training"]["gpus"] if torch.cuda.is_available() else None
-    distributed_backend = "cuda" if torch.cuda.is_available() else None
+    # Auto-detect GPUs: use "auto" in config or fall back to available devices
+    if not torch.cuda.is_available():
+        gpus = None
+        distributed_backend = None
+    else:
+        num_available = torch.cuda.device_count()
+        configured_gpus = config["training"]["gpus"]
+        if configured_gpus == "auto":
+            gpus = list(range(num_available))
+        elif isinstance(configured_gpus, list):
+            # Filter to only available GPU IDs
+            valid = [g for g in configured_gpus if g < num_available]
+            gpus = valid if valid else list(range(num_available))
+        else:
+            gpus = list(range(num_available))
+        distributed_backend = "cuda"
+        print_only(f"Using GPUs: {gpus} ({num_available} available)")
 
     # default logger used by trainer
     logger_dir = os.path.join(os.getcwd(), "Experiments", "tensorboard_logs")
@@ -154,7 +168,7 @@ def main(config):
             name=config["exp"]["exp_name"], 
             save_dir=os.path.join(logger_dir, config["exp"]["exp_name"]), 
             project="Real-work-dataset",
-            # offline=True
+            offline=True  # skip wandb login prompt
     )
 
     trainer = pl.Trainer(
@@ -164,7 +178,7 @@ def main(config):
         default_root_dir=exp_dir,
         devices=gpus,
         accelerator=distributed_backend,
-        strategy=DDPStrategy(find_unused_parameters=True),
+        strategy=DDPStrategy(find_unused_parameters=True) if len(gpus or []) > 1 else "auto",
         limit_train_batches=1.0,  # Useful for fast experiment
         gradient_clip_val=5.0,
         logger=comet_logger,

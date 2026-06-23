@@ -139,6 +139,7 @@ def main():
     if args.mix is None and (args.s1 is None or args.s2 is None):
         parser.error("Without --mix, provide both --s1 and --s2 so the script can create a mixture.")
 
+    print("conf_dir:", args.conf_dir)
     with open(args.conf_dir, "rb") as f:
         conf = yaml.safe_load(f)
 

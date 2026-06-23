@@ -1,18 +1,18 @@
-# Network config
+# Network config — reduced for 6GB laptop GPU
 audionet:
   audionet_name: SPMamba
   audionet_config:
     input_dim: 64
     n_srcs: 2
-    n_fft: 256
-    stride: 64
+    n_fft: 512
+    stride: 128
     window: hann
     n_imics: 1
-    n_layers: 6
-    lstm_hidden_units: 256
+    n_layers: 4             # 6 → 4
+    lstm_hidden_units: 128  # 256 → 128
     attn_n_head: 4
-    attn_approx_qk_dim: 512
-    emb_dim: 16
+    attn_approx_qk_dim: 256 # 512 → 256
+    emb_dim: 8              # 16 → 8
     emb_ks: 8
     emb_hs: 1
     activation: prelu
@@ -36,7 +36,7 @@ loss:
 
 training:
   system: AudioLightningModule
-  gpus: [1,2,3,4,5,6,7]
+  gpus: auto  # auto-detect available GPUs
   parallel: ddp
   epochs: 500
   early_stop:
@@ -45,7 +45,7 @@ training:
     patience: 20
     verbose: true
   SpeedAug: False
-  
+
 # Optim config
 optimizer:
   optim_name: adam
@@ -53,27 +53,27 @@ optimizer:
   weight_decay: 0
 
 # Sche config
-scheduler: 
+scheduler:
   sche_name: ReduceLROnPlateau
   sche_config:
     patience: 10
     factor: 0.5
 
-# Data config
+# Data config — LRS3-2mix (reduced segment for 6GB GPU)
 datamodule:
-  data_name: Libri2MixDataModule
+  data_name: Echo2MixDataModule
   data_config:
-    train_dir: DataPreProcess/Libri2Mix_16k/train-100
-    valid_dir: DataPreProcess/Libri2Mix_16k/dev
-    test_dir: DataPreProcess/Libri2Mix_16k/test
+    train_dir: DataPreProcess/LRS3/train
+    valid_dir: DataPreProcess/LRS3/val
+    test_dir: DataPreProcess/LRS3/val   # reuse val (test JSON has stale paths)
     n_src: 2
     sample_rate: 16000
-    segment: 3.0
+    segment: 2.0             # 3.0 → 2.0 (shorter = less memory)
     normalize_audio: false
     batch_size: 1
-    num_workers: 8
+    num_workers: 0           # 0 for WSL /mnt/e compatibility
     pin_memory: true
     persistent_workers: false
 
 exp:
-  exp_name: SPMamba-Libri2Mix
+  exp_name: SPMamba-LRS3-mini

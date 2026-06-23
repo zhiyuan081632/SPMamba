@@ -36,7 +36,7 @@ loss:
 
 training:
   system: AudioLightningModule
-  gpus: [4,5,6,7]
+  gpus: auto  # auto-detect available GPUs
   parallel: ddp
   epochs: 500
   early_stop:
@@ -59,13 +59,13 @@ scheduler:
     patience: 10
     factor: 0.5
 
-# Data config
+# Data config — LRS3-2mix (reverberant mixtures, Echo2Mix-compatible format)
 datamodule:
   data_name: Echo2MixDataModule
   data_config:
-    train_dir: DataPreProcess/Libri2Mix_16k/train-100
-    valid_dir: DataPreProcess/Libri2Mix_16k/dev
-    test_dir: DataPreProcess/Libri2Mix_16k/test
+    train_dir: DataPreProcess/LRS3/train
+    valid_dir: DataPreProcess/LRS3/val
+    test_dir: DataPreProcess/LRS3/test
     n_src: 2
     sample_rate: 16000
     segment: 3.0
@@ -76,4 +76,4 @@ datamodule:
     persistent_workers: false
 
 exp:
-  exp_name: SPMamba-Echo2Mix
+  exp_name: SPMamba-LRS3

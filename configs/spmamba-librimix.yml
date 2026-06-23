@@ -36,7 +36,7 @@ loss:
 
 training:
   system: AudioLightningModule
-  gpus: [1,2,3,4,5,6,7]
+  gpus: auto  # auto-detect available GPUs
   parallel: ddp
   epochs: 500
   early_stop:
