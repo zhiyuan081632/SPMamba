@@ -166,10 +166,20 @@ def generate_synthetic_rir(
         noise = noise * noise_scale / (np.std(noise) + 1e-10)
         rir[tail_start:] += noise
 
-    # --- Normalise peak to 1.0 ---
-    peak = np.max(np.abs(rir))
-    if peak > 0:
-        rir = rir / peak
+    # --- Shift RIR so direct path starts at sample 0 (remove propagation delay) ---
+    if delay_direct > 0 and delay_direct < rir_length:
+        rir = np.concatenate([rir[delay_direct:], np.zeros(delay_direct)])
+
+    # --- Normalise so direct path is the dominant component ---
+    # Reflections are scaled to at most 0.3x the direct path amplitude.
+    # This prevents reflections from dominating the cross-correlation
+    # and causing an apparent delay in the reverberant audio.
+    direct_amp = abs(rir[0])
+    if direct_amp > 0:
+        max_other = np.max(np.abs(rir[1:])) if len(rir) > 1 else 0.0
+        if max_other > 0:
+            rir[1:] *= (direct_amp * 0.3) / max_other
+        rir = rir / direct_amp  # direct path = 1.0
 
     return rir.astype(np.float32)
 
