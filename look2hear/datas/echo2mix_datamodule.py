@@ -243,14 +243,14 @@ class Echo2MixDataModule(object):
             json_dir=self.valid_dir,
             n_src=self.n_src,
             sample_rate=self.sample_rate,
-            segment=None,
+            segment=self.segment,
             normalize_audio=self.normalize_audio,
         )
         self.data_test = Echo2MixDataset(
             json_dir=self.test_dir,
             n_src=self.n_src,
             sample_rate=self.sample_rate,
-            segment=None,
+            segment=self.segment,
             normalize_audio=self.normalize_audio,
         )
 
